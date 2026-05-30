@@ -31,7 +31,7 @@ class DashboardTab(QWidget):
             ("Total Customers", "#546e7a"),    # أزرق رمادي داكن
             ("Active Deals", "#607d8b"),        # أزرق رمادي
             ("Pipeline Value", "#78909c"),      # أزرق رمادي متوسط
-            ("Pending Tasks", "#455a64")        # رمادي داكن
+            ("Pending Tasks", "#455a64")
         ]
 
         for i, (lbl, clr) in enumerate(card_configs):
@@ -85,7 +85,7 @@ class DashboardTab(QWidget):
         upcoming_layout = QVBoxLayout()
         self.upcoming_label = QLabel("Loading...")
         self.upcoming_label.setWordWrap(True)
-        self.upcoming_label.setStyleSheet("font-weight: normal; color: #333;")
+        self.upcoming_label.setStyleSheet("font-weight: normal; color: #ffffff;")
         upcoming_layout.addWidget(self.upcoming_label)
         upcoming_group.setLayout(upcoming_layout)
 

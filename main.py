@@ -2,7 +2,7 @@ import sys
 import sqlite3
 import os
 import re
-import subprocess
+import csv
 from datetime import datetime, timedelta
 
 from PyQt6.QtWidgets import (
@@ -16,10 +16,6 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QAbstractTableModel, QDate, QEvent, QTimer, QLocale
 from PyQt6.QtGui import QFont, QSyntaxHighlighter, QTextCharFormat, QColor, QTextCursor
 
-# --------------------------- رقم الإصدار الحالي ---------------------------
-CURRENT_VERSION = "1.0.1"
-GITHUB_RAW_URL = "https://raw.githubusercontent.com/killers007x/RDENCRM/refs/heads/main/version.txt"
-
 # --------------------------- DATABASE ---------------------------
 class Database:
     def __init__(self, db_name="crm_data.db"):
@@ -28,6 +24,16 @@ class Database:
         self.migrate_if_needed()
 
     def create_tables(self):
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action TEXT NOT NULL,
+                entity TEXT NOT NULL,
+                entity_id INTEGER,
+                details TEXT,
+                timestamp TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            )
+        """)
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS companies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,6 +112,22 @@ class Database:
             self.conn.execute("ALTER TABLE contacts ADD COLUMN company_id INTEGER REFERENCES companies(id)")
             self.conn.commit()
 
+    # ========== Activity Log ==========
+    def log_activity(self, action, entity, entity_id=None, details=""):
+        self.conn.execute(
+            "INSERT INTO activity_log (action, entity, entity_id, details) VALUES (?, ?, ?, ?)",
+            (action, entity, entity_id, details)
+        )
+        self.conn.commit()
+
+    def fetch_recent_activities(self, limit=100):
+        cur = self.conn.execute("""
+            SELECT timestamp, action, entity, details
+            FROM activity_log
+            ORDER BY id DESC LIMIT ?
+        """, (limit,))
+        return cur.fetchall()
+
     # ========== Contacts ==========
     def fetch_all_contacts(self):
         cur = self.conn.execute("""
@@ -130,6 +152,7 @@ class Database:
             (name, phone, email, company_id, notes)
         )
         self.conn.commit()
+        self.log_activity("Added", "Contact", None, f"Added contact: {name}")
 
     def update_contact(self, contact_id, name, phone, email, company_id, notes):
         self.conn.execute(
@@ -137,10 +160,12 @@ class Database:
             (name, phone, email, company_id, notes, contact_id)
         )
         self.conn.commit()
+        self.log_activity("Updated", "Contact", contact_id, f"Updated contact: {name}")
 
     def delete_contact(self, contact_id):
         self.conn.execute("DELETE FROM contacts WHERE id=?", (contact_id,))
         self.conn.commit()
+        self.log_activity("Deleted", "Contact", contact_id, f"Deleted contact ID: {contact_id}")
 
     # ========== Companies ==========
     def fetch_all_companies(self):
@@ -160,6 +185,7 @@ class Database:
             (name, address, phone, website, notes)
         )
         self.conn.commit()
+        self.log_activity("Added", "Company", None, f"Added company: {name}")
 
     def update_company(self, company_id, name, address, phone, website, notes):
         self.conn.execute(
@@ -167,10 +193,12 @@ class Database:
             (name, address, phone, website, notes, company_id)
         )
         self.conn.commit()
+        self.log_activity("Updated", "Company", company_id, f"Updated company: {name}")
 
     def delete_company(self, company_id):
         self.conn.execute("DELETE FROM companies WHERE id=?", (company_id,))
         self.conn.commit()
+        self.log_activity("Deleted", "Company", company_id, f"Deleted company ID: {company_id}")
 
     def get_company_list(self):
         cur = self.conn.execute("SELECT id, name FROM companies ORDER BY name")
@@ -229,6 +257,7 @@ class Database:
             (title, description, due_date.toString("yyyy-MM-dd") if due_date else None, status, contact_id)
         )
         self.conn.commit()
+        self.log_activity("Added", "Task", None, f"Added task: {title}")
 
     def update_task(self, task_id, title, description, due_date, status, contact_id):
         self.conn.execute(
@@ -236,10 +265,12 @@ class Database:
             (title, description, due_date.toString("yyyy-MM-dd") if due_date else None, status, contact_id, task_id)
         )
         self.conn.commit()
+        self.log_activity("Updated", "Task", task_id, f"Updated task: {title}")
 
     def delete_task(self, task_id):
         self.conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
         self.conn.commit()
+        self.log_activity("Deleted", "Task", task_id, f"Deleted task ID: {task_id}")
 
     # ========== Deals ==========
     def fetch_all_deals(self):
@@ -269,6 +300,7 @@ class Database:
              contact_id)
         )
         self.conn.commit()
+        self.log_activity("Added", "Deal", None, f"Added deal: {title}")
 
     def update_deal(self, deal_id, title, value, stage, expected_close_date, contact_id):
         self.conn.execute(
@@ -278,6 +310,7 @@ class Database:
              contact_id, deal_id)
         )
         self.conn.commit()
+        self.log_activity("Updated", "Deal", deal_id, f"Updated deal: {title}")
 
     def update_deal_stage(self, deal_id, new_stage):
         self.conn.execute("UPDATE deals SET stage=? WHERE id=?", (new_stage, deal_id))
@@ -286,6 +319,7 @@ class Database:
     def delete_deal(self, deal_id):
         self.conn.execute("DELETE FROM deals WHERE id=?", (deal_id,))
         self.conn.commit()
+        self.log_activity("Deleted", "Deal", deal_id, f"Deleted deal ID: {deal_id}")
 
     # ========== Helpers ==========
     def get_contact_list(self):
@@ -309,8 +343,134 @@ class Database:
         self.conn.execute("DELETE FROM scripts WHERE id=?", (script_id,))
         self.conn.commit()
 
+    # ========== Dashboard Stats ==========
+    def total_contacts(self):
+        return self.conn.execute("SELECT COUNT(*) FROM contacts").fetchone()[0]
 
-# --------------------------- TABLE MODELS ---------------------------
+    def open_deals(self):
+        return self.conn.execute("SELECT COUNT(*) FROM deals WHERE stage NOT IN ('Won', 'Lost')").fetchone()[0]
+
+    def total_revenue(self):
+        cur = self.conn.execute("SELECT SUM(value) FROM deals WHERE stage='Won'")
+        val = cur.fetchone()[0]
+        return val if val else 0.0
+
+    def close_ratio(self):
+        total = self.conn.execute("SELECT COUNT(*) FROM deals").fetchone()[0]
+        if total == 0:
+            return 0.0
+        won = self.conn.execute("SELECT COUNT(*) FROM deals WHERE stage='Won'").fetchone()[0]
+        return round(won / total * 100, 1)
+
+    # ========== EXPORT/IMPORT CSV ==========
+    def export_contacts_csv(self, filepath):
+        contacts = self.fetch_all_contacts()
+        with open(filepath, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["ID", "Name", "Phone", "Email", "Company", "Notes"])
+            for c in contacts:
+                writer.writerow(c)
+
+    def import_contacts_csv(self, filepath):
+        with open(filepath, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                name = row.get("Name", "").strip()
+                if not name:
+                    continue
+                phone = row.get("Phone", "")
+                email = row.get("Email", "")
+                company = row.get("Company", "")
+                notes = row.get("Notes", "")
+                # find company_id if company name given
+                company_id = None
+                if company:
+                    cur = self.conn.execute("SELECT id FROM companies WHERE name=?", (company,))
+                    comp = cur.fetchone()
+                    if comp:
+                        company_id = comp[0]
+                self.add_contact(name, phone, email, company_id, notes)
+
+    def export_companies_csv(self, filepath):
+        companies = self.fetch_all_companies()
+        with open(filepath, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["ID", "Name", "Address", "Phone", "Website", "Notes"])
+            for c in companies:
+                writer.writerow(c)
+
+    def import_companies_csv(self, filepath):
+        with open(filepath, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                name = row.get("Name", "").strip()
+                if not name:
+                    continue
+                address = row.get("Address", "")
+                phone = row.get("Phone", "")
+                website = row.get("Website", "")
+                notes = row.get("Notes", "")
+                self.add_company(name, address, phone, website, notes)
+
+    def export_tasks_csv(self, filepath):
+        tasks = self.fetch_all_tasks()
+        with open(filepath, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["ID", "Title", "Description", "Due Date", "Status", "Contact"])
+            for t in tasks:
+                writer.writerow(t)
+
+    def import_tasks_csv(self, filepath):
+        with open(filepath, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                title = row.get("Title", "").strip()
+                if not title:
+                    continue
+                description = row.get("Description", "")
+                due_date = row.get("Due Date", None)
+                status = row.get("Status", "Pending")
+                contact_name = row.get("Contact", "")
+                contact_id = None
+                if contact_name:
+                    cur = self.conn.execute("SELECT id FROM contacts WHERE name=?", (contact_name,))
+                    c = cur.fetchone()
+                    if c:
+                        contact_id = c[0]
+                self.add_task(title, description, due_date if due_date else None, status, contact_id)
+
+    def export_deals_csv(self, filepath):
+        deals = self.fetch_all_deals()
+        with open(filepath, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["ID", "Title", "Value", "Stage", "Expected Close", "Contact"])
+            for d in deals:
+                writer.writerow(d)
+
+    def import_deals_csv(self, filepath):
+        with open(filepath, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                title = row.get("Title", "").strip()
+                if not title:
+                    continue
+                try:
+                    value = float(row.get("Value", 0))
+                except:
+                    value = 0.0
+                stage = row.get("Stage", "Lead")
+                expected_close = row.get("Expected Close", None)
+                contact_name = row.get("Contact", "")
+                contact_id = None
+                if contact_name:
+                    cur = self.conn.execute("SELECT id FROM contacts WHERE name=?", (contact_name,))
+                    c = cur.fetchone()
+                    if c:
+                        contact_id = c[0]
+                self.add_deal(title, value, stage, expected_close if expected_close else None, contact_id)
+
+
+# --------------------------- TABLE MODELS (unchanged) ---------------------------
 class ContactsTableModel(QAbstractTableModel):
     def __init__(self, data=None):
         super().__init__()
@@ -387,7 +547,7 @@ class TasksTableModel(QAbstractTableModel):
         self.endResetModel()
 
 
-# --------------------------- CONTACTS TAB ---------------------------
+# --------------------------- CONTACTS TAB (with Export/Import) ---------------------------
 class ContactsTab(QWidget):
     def __init__(self, db):
         super().__init__()
@@ -397,12 +557,20 @@ class ContactsTab(QWidget):
 
         main_layout = QVBoxLayout(self)
 
+        # Search + Export/Import
         search_layout = QHBoxLayout()
         search_layout.addWidget(QLabel("Search:"))
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search contacts...")
         self.search_input.textChanged.connect(self.on_search)
         search_layout.addWidget(self.search_input)
+
+        self.export_btn = QPushButton("Export CSV")
+        self.export_btn.clicked.connect(self.export_data)
+        self.import_btn = QPushButton("Import CSV")
+        self.import_btn.clicked.connect(self.import_data)
+        search_layout.addWidget(self.export_btn)
+        search_layout.addWidget(self.import_btn)
         main_layout.addLayout(search_layout)
 
         content = QHBoxLayout()
@@ -415,14 +583,12 @@ class ContactsTab(QWidget):
 
         right_panel = QVBoxLayout()
         right_panel.setContentsMargins(0, 0, 0, 0)
-
         details = QTabWidget()
         details.setTabPosition(QTabWidget.TabPosition.North)
 
         # Basic Info
         basic_widget = QWidget()
         basic_main_layout = QVBoxLayout()
-
         group_box = QGroupBox("Contact Details")
         form_layout = QFormLayout()
         self.name_input = QLineEdit()
@@ -449,7 +615,6 @@ class ContactsTab(QWidget):
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             btn_layout.addWidget(btn)
         basic_main_layout.addLayout(btn_layout)
-
         basic_widget.setLayout(basic_main_layout)
         details.addTab(basic_widget, "Basic Info")
 
@@ -513,6 +678,66 @@ class ContactsTab(QWidget):
     def on_search(self, text):
         data = self.db.search_contacts(text) if text else self.db.fetch_all_contacts()
         self.model.refresh_data(data)
+
+    def export_data(self):
+        filepath, _ = QFileDialog.getSaveFileName(self, "Export Contacts", "", "CSV Files (*.csv);;Excel Files (*.xlsx)")
+        if not filepath:
+            return
+        if filepath.endswith('.xlsx'):
+            try:
+                import openpyxl
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws.title = "Contacts"
+                contacts = self.db.fetch_all_contacts()
+                ws.append(["ID", "Name", "Phone", "Email", "Company", "Notes"])
+                for c in contacts:
+                    ws.append(list(c))
+                wb.save(filepath)
+                QMessageBox.information(self, "Success", "Contacts exported to Excel.")
+            except ImportError:
+                QMessageBox.warning(self, "Error", "openpyxl library not installed. Saving as CSV.")
+                self.db.export_contacts_csv(filepath)
+                QMessageBox.information(self, "Success", "Contacts exported to CSV.")
+        else:
+            self.db.export_contacts_csv(filepath)
+            QMessageBox.information(self, "Success", "Contacts exported to CSV.")
+
+    def import_data(self):
+        filepath, _ = QFileDialog.getOpenFileName(self, "Import Contacts", "", "CSV Files (*.csv);;Excel Files (*.xlsx)")
+        if not filepath:
+            return
+        if filepath.endswith('.xlsx'):
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(filepath)
+                ws = wb.active
+                headers = [cell.value for cell in ws[1]]
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    data = dict(zip(headers, row))
+                    name = data.get("Name", "").strip()
+                    if not name:
+                        continue
+                    phone = data.get("Phone", "")
+                    email = data.get("Email", "")
+                    company = data.get("Company", "")
+                    notes = data.get("Notes", "")
+                    company_id = None
+                    if company:
+                        cur = self.db.conn.execute("SELECT id FROM companies WHERE name=?", (company,))
+                        comp = cur.fetchone()
+                        if comp:
+                            company_id = comp[0]
+                    self.db.add_contact(name, phone, email, company_id, notes)
+                self.load_data()
+                QMessageBox.information(self, "Success", "Contacts imported from Excel.")
+            except ImportError:
+                QMessageBox.warning(self, "Error", "openpyxl library not installed.")
+                return
+        else:
+            self.db.import_contacts_csv(filepath)
+            self.load_data()
+            QMessageBox.information(self, "Success", "Contacts imported from CSV.")
 
     def on_contact_select(self, index):
         row = index.row()
@@ -623,7 +848,7 @@ class ContactsTab(QWidget):
             QMessageBox.information(self, "Success", "Contact deleted.")
 
 
-# --------------------------- COMPANIES TAB ---------------------------
+# --------------------------- COMPANIES TAB (with Export/Import) ---------------------------
 class CompaniesTab(QWidget):
     def __init__(self, db):
         super().__init__()
@@ -639,6 +864,13 @@ class CompaniesTab(QWidget):
         self.search_input.setPlaceholderText("Search companies...")
         self.search_input.textChanged.connect(self.on_search)
         search_layout.addWidget(self.search_input)
+
+        self.export_btn = QPushButton("Export CSV")
+        self.export_btn.clicked.connect(self.export_data)
+        self.import_btn = QPushButton("Import CSV")
+        self.import_btn.clicked.connect(self.import_data)
+        search_layout.addWidget(self.export_btn)
+        search_layout.addWidget(self.import_btn)
         main_layout.addLayout(search_layout)
 
         content = QHBoxLayout()
@@ -697,6 +929,60 @@ class CompaniesTab(QWidget):
         data = self.db.search_companies(text) if text else self.db.fetch_all_companies()
         self.model.refresh_data(data)
 
+    def export_data(self):
+        filepath, _ = QFileDialog.getSaveFileName(self, "Export Companies", "", "CSV Files (*.csv);;Excel Files (*.xlsx)")
+        if not filepath:
+            return
+        if filepath.endswith('.xlsx'):
+            try:
+                import openpyxl
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws.title = "Companies"
+                companies = self.db.fetch_all_companies()
+                ws.append(["ID", "Name", "Address", "Phone", "Website", "Notes"])
+                for c in companies:
+                    ws.append(list(c))
+                wb.save(filepath)
+                QMessageBox.information(self, "Success", "Companies exported to Excel.")
+            except ImportError:
+                QMessageBox.warning(self, "Error", "openpyxl library not installed. Saving as CSV.")
+                self.db.export_companies_csv(filepath)
+                QMessageBox.information(self, "Success", "Companies exported to CSV.")
+        else:
+            self.db.export_companies_csv(filepath)
+            QMessageBox.information(self, "Success", "Companies exported to CSV.")
+
+    def import_data(self):
+        filepath, _ = QFileDialog.getOpenFileName(self, "Import Companies", "", "CSV Files (*.csv);;Excel Files (*.xlsx)")
+        if not filepath:
+            return
+        if filepath.endswith('.xlsx'):
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(filepath)
+                ws = wb.active
+                headers = [cell.value for cell in ws[1]]
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    data = dict(zip(headers, row))
+                    name = data.get("Name", "").strip()
+                    if not name:
+                        continue
+                    address = data.get("Address", "")
+                    phone = data.get("Phone", "")
+                    website = data.get("Website", "")
+                    notes = data.get("Notes", "")
+                    self.db.add_company(name, address, phone, website, notes)
+                self.load_data()
+                QMessageBox.information(self, "Success", "Companies imported from Excel.")
+            except ImportError:
+                QMessageBox.warning(self, "Error", "openpyxl library not installed.")
+                return
+        else:
+            self.db.import_companies_csv(filepath)
+            self.load_data()
+            QMessageBox.information(self, "Success", "Companies imported from CSV.")
+
     def on_row_select(self, index):
         row = index.row()
         record = self.model._data[row]
@@ -751,7 +1037,7 @@ class CompaniesTab(QWidget):
             QMessageBox.information(self, "Success", "Company deleted.")
 
 
-# --------------------------- TASKS TAB ---------------------------
+# --------------------------- TASKS TAB (with Export/Import) ---------------------------
 class TasksTab(QWidget):
     def __init__(self, db):
         super().__init__()
@@ -767,6 +1053,13 @@ class TasksTab(QWidget):
         self.search_input.setPlaceholderText("Search tasks...")
         self.search_input.textChanged.connect(self.on_search)
         search_layout.addWidget(self.search_input)
+
+        self.export_btn = QPushButton("Export CSV")
+        self.export_btn.clicked.connect(self.export_data)
+        self.import_btn = QPushButton("Import CSV")
+        self.import_btn.clicked.connect(self.import_data)
+        search_layout.addWidget(self.export_btn)
+        search_layout.addWidget(self.import_btn)
         main_layout.addLayout(search_layout)
 
         content = QHBoxLayout()
@@ -833,6 +1126,66 @@ class TasksTab(QWidget):
     def on_search(self, text):
         data = self.db.search_tasks(text) if text else self.db.fetch_all_tasks()
         self.model.refresh_data(data)
+
+    def export_data(self):
+        filepath, _ = QFileDialog.getSaveFileName(self, "Export Tasks", "", "CSV Files (*.csv);;Excel Files (*.xlsx)")
+        if not filepath:
+            return
+        if filepath.endswith('.xlsx'):
+            try:
+                import openpyxl
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws.title = "Tasks"
+                tasks = self.db.fetch_all_tasks()
+                ws.append(["ID", "Title", "Description", "Due Date", "Status", "Contact"])
+                for t in tasks:
+                    ws.append(list(t))
+                wb.save(filepath)
+                QMessageBox.information(self, "Success", "Tasks exported to Excel.")
+            except ImportError:
+                QMessageBox.warning(self, "Error", "openpyxl library not installed. Saving as CSV.")
+                self.db.export_tasks_csv(filepath)
+                QMessageBox.information(self, "Success", "Tasks exported to CSV.")
+        else:
+            self.db.export_tasks_csv(filepath)
+            QMessageBox.information(self, "Success", "Tasks exported to CSV.")
+
+    def import_data(self):
+        filepath, _ = QFileDialog.getOpenFileName(self, "Import Tasks", "", "CSV Files (*.csv);;Excel Files (*.xlsx)")
+        if not filepath:
+            return
+        if filepath.endswith('.xlsx'):
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(filepath)
+                ws = wb.active
+                headers = [cell.value for cell in ws[1]]
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    data = dict(zip(headers, row))
+                    title = data.get("Title", "").strip()
+                    if not title:
+                        continue
+                    description = data.get("Description", "")
+                    due_date = data.get("Due Date", None)
+                    status = data.get("Status", "Pending")
+                    contact_name = data.get("Contact", "")
+                    contact_id = None
+                    if contact_name:
+                        cur = self.db.conn.execute("SELECT id FROM contacts WHERE name=?", (contact_name,))
+                        c = cur.fetchone()
+                        if c:
+                            contact_id = c[0]
+                    self.db.add_task(title, description, due_date if due_date else None, status, contact_id)
+                self.load_data()
+                QMessageBox.information(self, "Success", "Tasks imported from Excel.")
+            except ImportError:
+                QMessageBox.warning(self, "Error", "openpyxl library not installed.")
+                return
+        else:
+            self.db.import_tasks_csv(filepath)
+            self.load_data()
+            QMessageBox.information(self, "Success", "Tasks imported from CSV.")
 
     def on_row_select(self, index):
         row = index.row()
@@ -901,42 +1254,7 @@ class TasksTab(QWidget):
             QMessageBox.information(self, "Success", "Task deleted.")
 
 
-# --------------------------- KANBAN DEALS TAB ---------------------------
-class DealCard(QFrame):
-    def __init__(self, deal_id, title, value, close_date, contact_name, parent=None):
-        super().__init__(parent)
-        self.deal_id = deal_id
-        self.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Raised)
-        self.setMinimumHeight(60)
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel(f"<b>{title}</b>"))
-        layout.addWidget(QLabel(f"${value:,.2f}"))
-        if close_date:
-            layout.addWidget(QLabel(f"Close: {close_date}"))
-        if contact_name:
-            layout.addWidget(QLabel(f"Contact: {contact_name}"))
-        self.setLayout(layout)
-
-class KanbanColumn(QListWidget):
-    def __init__(self, stage, parent=None):
-        super().__init__(parent)
-        self.stage = stage
-        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
-        self.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-
-    def dropEvent(self, event):
-        super().dropEvent(event)
-        QTimer.singleShot(100, self.parent().parent().refresh_pipeline)
-
-    def add_deal_card(self, deal):
-        item = QListWidgetItem()
-        card = DealCard(deal[0], deal[1], deal[2], deal[4], deal[5])
-        item.setSizeHint(card.sizeHint())
-        self.addItem(item)
-        self.setItemWidget(item, card)
-        item.deal_id = deal[0]
-
+# --------------------------- KANBAN DEALS TAB (with Export/Import) ---------------------------
 class KanbanDealsTab(QWidget):
     def __init__(self, db):
         super().__init__()
@@ -951,6 +1269,13 @@ class KanbanDealsTab(QWidget):
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search deals...")
         search_layout.addWidget(self.search_input)
+
+        self.export_btn = QPushButton("Export CSV")
+        self.export_btn.clicked.connect(self.export_data)
+        self.import_btn = QPushButton("Import CSV")
+        self.import_btn.clicked.connect(self.import_data)
+        search_layout.addWidget(self.export_btn)
+        search_layout.addWidget(self.import_btn)
         main_layout.addLayout(search_layout)
 
         scroll = QScrollArea()
@@ -1027,6 +1352,106 @@ class KanbanDealsTab(QWidget):
                              close_date.date(), contact_combo.currentData())
             self.load_pipeline()
 
+    def export_data(self):
+        filepath, _ = QFileDialog.getSaveFileName(self, "Export Deals", "", "CSV Files (*.csv);;Excel Files (*.xlsx)")
+        if not filepath:
+            return
+        if filepath.endswith('.xlsx'):
+            try:
+                import openpyxl
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws.title = "Deals"
+                deals = self.db.fetch_all_deals()
+                ws.append(["ID", "Title", "Value", "Stage", "Expected Close", "Contact"])
+                for d in deals:
+                    ws.append(list(d))
+                wb.save(filepath)
+                QMessageBox.information(self, "Success", "Deals exported to Excel.")
+            except ImportError:
+                QMessageBox.warning(self, "Error", "openpyxl library not installed. Saving as CSV.")
+                self.db.export_deals_csv(filepath)
+                QMessageBox.information(self, "Success", "Deals exported to CSV.")
+        else:
+            self.db.export_deals_csv(filepath)
+            QMessageBox.information(self, "Success", "Deals exported to CSV.")
+
+    def import_data(self):
+        filepath, _ = QFileDialog.getOpenFileName(self, "Import Deals", "", "CSV Files (*.csv);;Excel Files (*.xlsx)")
+        if not filepath:
+            return
+        if filepath.endswith('.xlsx'):
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(filepath)
+                ws = wb.active
+                headers = [cell.value for cell in ws[1]]
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    data = dict(zip(headers, row))
+                    title = data.get("Title", "").strip()
+                    if not title:
+                        continue
+                    try:
+                        value = float(data.get("Value", 0))
+                    except:
+                        value = 0.0
+                    stage = data.get("Stage", "Lead")
+                    expected_close = data.get("Expected Close", None)
+                    contact_name = data.get("Contact", "")
+                    contact_id = None
+                    if contact_name:
+                        cur = self.db.conn.execute("SELECT id FROM contacts WHERE name=?", (contact_name,))
+                        c = cur.fetchone()
+                        if c:
+                            contact_id = c[0]
+                    self.db.add_deal(title, value, stage, expected_close if expected_close else None, contact_id)
+                self.load_pipeline()
+                QMessageBox.information(self, "Success", "Deals imported from Excel.")
+            except ImportError:
+                QMessageBox.warning(self, "Error", "openpyxl library not installed.")
+                return
+        else:
+            self.db.import_deals_csv(filepath)
+            self.load_pipeline()
+            QMessageBox.information(self, "Success", "Deals imported from CSV.")
+
+
+# --------------------------- DealCard / KanbanColumn (unchanged) ---------------------------
+class DealCard(QFrame):
+    def __init__(self, deal_id, title, value, close_date, contact_name, parent=None):
+        super().__init__(parent)
+        self.deal_id = deal_id
+        self.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Raised)
+        self.setMinimumHeight(60)
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel(f"<b>{title}</b>"))
+        layout.addWidget(QLabel(f"${value:,.2f}"))
+        if close_date:
+            layout.addWidget(QLabel(f"Close: {close_date}"))
+        if contact_name:
+            layout.addWidget(QLabel(f"Contact: {contact_name}"))
+        self.setLayout(layout)
+
+class KanbanColumn(QListWidget):
+    def __init__(self, stage, parent=None):
+        super().__init__(parent)
+        self.stage = stage
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+
+    def dropEvent(self, event):
+        super().dropEvent(event)
+        QTimer.singleShot(100, self.parent().parent().refresh_pipeline)
+
+    def add_deal_card(self, deal):
+        item = QListWidgetItem()
+        card = DealCard(deal[0], deal[1], deal[2], deal[4], deal[5])
+        item.setSizeHint(card.sizeHint())
+        self.addItem(item)
+        self.setItemWidget(item, card)
+        item.deal_id = deal[0]
+
 
 # --------------------------- CALENDAR TAB ---------------------------
 class CalendarTab(QWidget):
@@ -1054,6 +1479,56 @@ class CalendarTab(QWidget):
             self.event_list.addItem(f"Task: {title} ({status}) - {desc if desc else ''}")
 
 
+# --------------------------- DASHBOARD TAB ---------------------------
+class DashboardTab(QWidget):
+    def __init__(self, db):
+        super().__init__()
+        self.db = db
+        layout = QVBoxLayout(self)
+
+        title = QLabel("<h2>Dashboard</h2>")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        cards_layout = QHBoxLayout()
+        self.lbl_contacts = QLabel()
+        self.lbl_open_deals = QLabel()
+        self.lbl_revenue = QLabel()
+        self.lbl_close_ratio = QLabel()
+
+        for lbl, caption in [(self.lbl_contacts, "Total Contacts"),
+                             (self.lbl_open_deals, "Open Deals"),
+                             (self.lbl_revenue, "Revenue (Won)"),
+                             (self.lbl_close_ratio, "Close Ratio")]:
+            container = QFrame()
+            container.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Raised)
+            inner = QVBoxLayout()
+            inner.addWidget(QLabel(f"<b>{caption}</b>"))
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setFont(QFont("Segoe UI", 16))
+            inner.addWidget(lbl)
+            container.setLayout(inner)
+            cards_layout.addWidget(container)
+
+        layout.addLayout(cards_layout)
+
+        layout.addWidget(QLabel("<b>Recent Activity</b>"))
+        self.activity_list = QListWidget()
+        layout.addWidget(self.activity_list)
+
+        self.refresh()
+
+    def refresh(self):
+        self.lbl_contacts.setText(str(self.db.total_contacts()))
+        self.lbl_open_deals.setText(str(self.db.open_deals()))
+        self.lbl_revenue.setText(f"${self.db.total_revenue():,.2f}")
+        self.lbl_close_ratio.setText(f"{self.db.close_ratio()}%")
+
+        self.activity_list.clear()
+        for timestamp, action, entity, details in self.db.fetch_recent_activities(20):
+            self.activity_list.addItem(f"[{timestamp}] {action} {entity}: {details}")
+
+
 # --------------------------- REMINDER ---------------------------
 def check_upcoming_tasks(db):
     tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -1064,79 +1539,50 @@ def check_upcoming_tasks(db):
         QMessageBox.information(None, "Task Reminder", msg)
 
 
-# --------------------------- LUA EDITOR ---------------------------
+# --------------------------- LUA EDITOR (unchanged) ---------------------------
 class LuaHighlighter(QSyntaxHighlighter):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.keywords = [
-            "and", "break", "do", "else", "elseif", "end", "false", "for",
-            "function", "goto", "if", "in", "local", "nil", "not", "or",
-            "repeat", "return", "then", "true", "until", "while"
-        ]
-        self.keyword_format = QTextCharFormat()
-        self.keyword_format.setForeground(QColor("#2B579A"))
-        self.keyword_format.setFontWeight(QFont.Weight.Bold)
-        self.comment_format = QTextCharFormat()
-        self.comment_format.setForeground(QColor("#5A8A5A"))
-        self.comment_format.setFontItalic(True)
-        self.string_format = QTextCharFormat()
-        self.string_format.setForeground(QColor("#B05A5A"))
-        self.number_format = QTextCharFormat()
-        self.number_format.setForeground(QColor("#4A7A8A"))
-
+        self.keywords = ["and","break","do","else","elseif","end","false","for","function","goto","if","in","local","nil","not","or","repeat","return","then","true","until","while"]
+        self.keyword_format = QTextCharFormat(); self.keyword_format.setForeground(QColor("#2B579A")); self.keyword_format.setFontWeight(QFont.Weight.Bold)
+        self.comment_format = QTextCharFormat(); self.comment_format.setForeground(QColor("#5A8A5A")); self.comment_format.setFontItalic(True)
+        self.string_format = QTextCharFormat(); self.string_format.setForeground(QColor("#B05A5A"))
+        self.number_format = QTextCharFormat(); self.number_format.setForeground(QColor("#4A7A8A"))
     def highlightBlock(self, text):
         for kw in self.keywords:
-            for m in re.finditer(r'\b' + kw + r'\b', text):
-                self.setFormat(m.start(), m.end() - m.start(), self.keyword_format)
-        for m in re.finditer(r'--[^\n]*', text):
-            self.setFormat(m.start(), m.end() - m.start(), self.comment_format)
-        for m in re.finditer(r'"[^"\\]*(\\.[^"\\]*)*"|\'[^\'\\]*(\\.[^\'\\]*)*\'', text):
-            self.setFormat(m.start(), m.end() - m.start(), self.string_format)
-        for m in re.finditer(r'\b\d+(\.\d+)?\b', text):
-            self.setFormat(m.start(), m.end() - m.start(), self.number_format)
-
+            for m in re.finditer(r'\b'+kw+r'\b', text): self.setFormat(m.start(), m.end()-m.start(), self.keyword_format)
+        for m in re.finditer(r'--[^\n]*', text): self.setFormat(m.start(), m.end()-m.start(), self.comment_format)
+        for m in re.finditer(r'"[^"\\]*(\\.[^"\\]*)*"|\'[^\'\\]*(\\.[^\'\\]*)*\'', text): self.setFormat(m.start(), m.end()-m.start(), self.string_format)
+        for m in re.finditer(r'\b\d+(\.\d+)?\b', text): self.setFormat(m.start(), m.end()-m.start(), self.number_format)
 
 class LuaCodeEditor(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.indent_size = 4
         self.highlighter = LuaHighlighter(self.document())
-
     def keyPressEvent(self, event):
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.auto_indent()
-        else:
-            super().keyPressEvent(event)
-
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter): self.auto_indent()
+        else: super().keyPressEvent(event)
     def auto_indent(self):
-        cursor = self.textCursor()
-        block = cursor.block()
-        text = block.text()
+        cursor = self.textCursor(); block = cursor.block(); text = block.text()
         cur_indent = len(text) - len(text.lstrip())
         trimmed = text.strip()
-        outdent_kw = ["end", "until", "else", "elseif"]
+        outdent_kw = ["end","until","else","elseif"]
         need_out = False
         if trimmed:
-            if trimmed.split()[0] in outdent_kw:
-                need_out = True
+            if trimmed.split()[0] in outdent_kw: need_out = True
         if need_out and cur_indent >= self.indent_size:
             cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
             cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor, self.indent_size)
-            cursor.removeSelectedText()
-            cur_indent -= self.indent_size
-        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
-        cursor.insertText("\n")
+            cursor.removeSelectedText(); cur_indent -= self.indent_size
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock); cursor.insertText("\n")
         new_indent = cur_indent
         if trimmed:
             if not need_out:
                 first_word = trimmed.split()[0]
-                if first_word in ["function", "if", "for", "while", "repeat"]:
-                    new_indent += self.indent_size
-                elif trimmed.endswith(("then", "do", "else")):
-                    new_indent += self.indent_size
-        cursor.insertText(" " * new_indent)
-        self.setTextCursor(cursor)
-
+                if first_word in ["function","if","for","while","repeat"]: new_indent += self.indent_size
+                elif trimmed.endswith(("then","do","else")): new_indent += self.indent_size
+        cursor.insertText(" " * new_indent); self.setTextCursor(cursor)
 
 class ScriptEditorWindow(QWidget):
     def __init__(self, db):
@@ -1152,168 +1598,73 @@ class ScriptEditorWindow(QWidget):
             self._setup_lua_env()
         except ImportError:
             self.lupa_available = False
-
         layout = QVBoxLayout(self)
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.script_list = QListWidget()
-        self.script_list.currentRowChanged.connect(self.on_script_selected)
+        self.script_list = QListWidget(); self.script_list.currentRowChanged.connect(self.on_script_selected)
         splitter.addWidget(self.script_list)
-
-        editor_container = QWidget()
-        editor_layout = QVBoxLayout(editor_container)
-        self.code_editor = LuaCodeEditor()
-        self.code_editor.setPlaceholderText("Write your Lua script here...")
+        editor_container = QWidget(); editor_layout = QVBoxLayout(editor_container)
+        self.code_editor = LuaCodeEditor(); self.code_editor.setPlaceholderText("Write your Lua script here...")
         editor_layout.addWidget(self.code_editor, 2)
-        self.output_console = QTextEdit()
-        self.output_console.setReadOnly(True)
+        self.output_console = QTextEdit(); self.output_console.setReadOnly(True)
         self.output_console.setPlaceholderText("Script output and errors will appear here...")
         editor_layout.addWidget(self.output_console, 1)
         splitter.addWidget(editor_container)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(0,1); splitter.setStretchFactor(1,3)
         layout.addWidget(splitter)
-
         btn_layout = QHBoxLayout()
-        self.btn_new = QPushButton("New Script")
-        self.btn_save = QPushButton("Save")
-        self.btn_delete = QPushButton("Delete")
-        self.btn_run = QPushButton("Run Script")
-        self.btn_refresh = QPushButton("Refresh List")
-        for btn in (self.btn_new, self.btn_save, self.btn_delete, self.btn_run, self.btn_refresh):
-            btn_layout.addWidget(btn)
+        self.btn_new = QPushButton("New Script"); self.btn_save = QPushButton("Save"); self.btn_delete = QPushButton("Delete")
+        self.btn_run = QPushButton("Run Script"); self.btn_refresh = QPushButton("Refresh List")
+        for btn in (self.btn_new, self.btn_save, self.btn_delete, self.btn_run, self.btn_refresh): btn_layout.addWidget(btn)
         layout.addLayout(btn_layout)
-
-        self.btn_new.clicked.connect(self.new_script)
-        self.btn_save.clicked.connect(self.save_script)
-        self.btn_delete.clicked.connect(self.delete_script)
-        self.btn_run.clicked.connect(self.run_script)
+        self.btn_new.clicked.connect(self.new_script); self.btn_save.clicked.connect(self.save_script)
+        self.btn_delete.clicked.connect(self.delete_script); self.btn_run.clicked.connect(self.run_script)
         self.btn_refresh.clicked.connect(self.load_script_list)
-
-        self.current_script_id = None
-        self.load_script_list()
+        self.current_script_id = None; self.load_script_list()
 
     def _setup_lua_env(self):
-        if not self.lua:
-            return
+        if not self.lua: return
         lua_db = self.lua.table()
-        def db_exec(sql, *params):
-            return self.db.conn.execute(sql, params).fetchall()
+        def db_exec(sql,*p): return self.db.conn.execute(sql, p).fetchall()
         lua_db.execute = db_exec
-        def db_exec_nq(sql, *params):
-            self.db.conn.execute(sql, params)
-            self.db.conn.commit()
+        def db_exec_nq(sql,*p): self.db.conn.execute(sql, p); self.db.conn.commit()
         lua_db.execute_non_query = db_exec_nq
         lua_app = self.lua.table()
-        def msgbox(title, msg):
-            QMessageBox.information(self, str(title), str(msg))
+        def msgbox(t,msg): QMessageBox.information(self, str(t), str(msg))
         lua_app.msgbox = msgbox
-        self.lua.globals()['db'] = lua_db
-        self.lua.globals()['app'] = lua_app
-        def lua_print(*args):
-            self.output_console.append(" ".join(str(a) for a in args))
+        self.lua.globals()['db'] = lua_db; self.lua.globals()['app'] = lua_app
+        def lua_print(*args): self.output_console.append(" ".join(str(a) for a in args))
         self.lua.globals()['print'] = lua_print
 
     def load_script_list(self):
-        self.script_list.clear()
-        self.scripts = self.db.fetch_all_scripts()
-        for s in self.scripts:
-            self.script_list.addItem(s[1])
-
+        self.script_list.clear(); self.scripts = self.db.fetch_all_scripts()
+        for s in self.scripts: self.script_list.addItem(s[1])
     def on_script_selected(self, idx):
-        if idx < 0:
-            return
-        s = self.scripts[idx]
-        self.current_script_id = s[0]
-        self.code_editor.setPlainText(s[2] if s[2] else "")
-
+        if idx<0: return
+        s = self.scripts[idx]; self.current_script_id = s[0]; self.code_editor.setPlainText(s[2] or "")
     def new_script(self):
         name, ok = QInputDialog.getText(self, "New Script", "Enter script name:")
         if ok and name.strip():
-            if any(s[1] == name.strip() for s in self.scripts):
-                QMessageBox.warning(self, "Warning", "A script with that name already exists.")
-                return
-            self.db.add_script(name.strip(), "-- New Lua script")
-            self.load_script_list()
-            for i, s in enumerate(self.scripts):
-                if s[1] == name.strip():
-                    self.script_list.setCurrentRow(i)
-                    break
-
+            if any(s[1]==name.strip() for s in self.scripts): QMessageBox.warning(self,"Warning","Name exists"); return
+            self.db.add_script(name.strip(), "-- New Lua script"); self.load_script_list()
+            for i,s in enumerate(self.scripts):
+                if s[1]==name.strip(): self.script_list.setCurrentRow(i); break
     def save_script(self):
-        if self.current_script_id is None:
-            QMessageBox.warning(self, "Warning", "No script selected.")
-            return
-        name = self.script_list.currentItem().text()
-        content = self.code_editor.toPlainText()
-        self.db.update_script(self.current_script_id, name, content)
-        QMessageBox.information(self, "Success", "Script saved.")
-        self.scripts = self.db.fetch_all_scripts()
-
+        if self.current_script_id is None: QMessageBox.warning(self,"Warning","No script selected"); return
+        self.db.update_script(self.current_script_id, self.script_list.currentItem().text(), self.code_editor.toPlainText())
+        QMessageBox.information(self,"Success","Script saved."); self.scripts = self.db.fetch_all_scripts()
     def delete_script(self):
-        if self.current_script_id is None:
-            QMessageBox.warning(self, "Warning", "No script selected.")
-            return
-        reply = QMessageBox.question(self, "Confirm", "Delete this script?",
-                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.Yes:
-            self.db.delete_script(self.current_script_id)
-            self.current_script_id = None
-            self.code_editor.clear()
-            self.load_script_list()
-
+        if self.current_script_id is None: return
+        if QMessageBox.question(self,"Confirm","Delete?") == QMessageBox.StandardButton.Yes:
+            self.db.delete_script(self.current_script_id); self.current_script_id=None
+            self.code_editor.clear(); self.load_script_list()
     def run_script(self):
-        if not self.lupa_available:
-            QMessageBox.critical(self, "Error", "Lupa library is not installed. Please run: pip install lupa")
-            return
-        if self.current_script_id is None:
-            QMessageBox.warning(self, "Warning", "No script selected.")
-            return
+        if not self.lupa_available: QMessageBox.critical(self,"Error","Install lupa"); return
+        if self.current_script_id is None: return
         code = self.code_editor.toPlainText().strip()
-        if not code:
-            return
+        if not code: return
         self.output_console.clear()
-        try:
-            self.lua.execute(code)
-        except Exception as e:
-            self.output_console.append(f"Error: {e}")
-
-
-# --------------------------- AUTO UPDATE FUNCTION ---------------------------
-def check_for_update(parent):
-    try:
-        import requests
-    except ImportError:
-        QMessageBox.information(parent, "Update Check",
-                                "Requests library is not installed. Cannot check for updates.\nPlease install requests: pip install requests")
-        return
-
-    try:
-        # جلب رقم الإصدار من المستودع
-        version_url = f"{GITHUB_RAW_URL}/version.txt"
-        response = requests.get(version_url, timeout=5)
-        if response.status_code != 200:
-            return
-        latest_version = response.text.strip()
-
-        if latest_version > CURRENT_VERSION:
-            reply = QMessageBox.question(parent, "Update Available",
-                                         f"A new version ({latest_version}) is available.\nDo you want to update now?",
-                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.Yes:
-                # تنزيل الكود الجديد
-                code_url = f"{GITHUB_RAW_URL}/main.py"
-                new_code = requests.get(code_url, timeout=10).text
-                # حفظه فوق الملف الحالي
-                current_file = sys.argv[0]
-                with open(current_file, 'w', encoding='utf-8') as f:
-                    f.write(new_code)
-                QMessageBox.information(parent, "Update", "Update downloaded. Application will restart.")
-                # إعادة تشغيل البرنامج
-                subprocess.Popen([sys.executable] + sys.argv)
-                sys.exit()
-    except Exception as e:
-        # تجاهل أي خطأ في عملية التحديث
-        pass
+        try: self.lua.execute(code)
+        except Exception as e: self.output_console.append(f"Error: {e}")
 
 
 # --------------------------- MAIN WINDOW ---------------------------
@@ -1325,16 +1676,16 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1200, 700)
 
         QTimer.singleShot(1000, lambda: check_upcoming_tasks(self.db))
-        # التحقق من التحديثات بعد 3 ثواني من الفتح
-        QTimer.singleShot(3000, lambda: check_for_update(self))
 
         self.tabs = QTabWidget()
+        self.dashboard_tab = DashboardTab(self.db)
         self.contacts_tab = ContactsTab(self.db)
         self.companies_tab = CompaniesTab(self.db)
         self.deals_tab = KanbanDealsTab(self.db)
         self.tasks_tab = TasksTab(self.db)
         self.calendar_tab = CalendarTab(self.db)
 
+        self.tabs.addTab(self.dashboard_tab, "Dashboard")
         self.tabs.addTab(self.contacts_tab, "Contacts")
         self.tabs.addTab(self.companies_tab, "Companies")
         self.tabs.addTab(self.deals_tab, "Deals Pipeline")
@@ -1346,6 +1697,12 @@ class MainWindow(QMainWindow):
         for tab in (self.contacts_tab, self.companies_tab, self.tasks_tab):
             if hasattr(tab, 'search_input'):
                 tab.search_input.installEventFilter(self)
+
+        self.tabs.currentChanged.connect(self.on_tab_changed)
+
+    def on_tab_changed(self, index):
+        if self.tabs.tabText(index) == "Dashboard":
+            self.dashboard_tab.refresh()
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):

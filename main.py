@@ -18,7 +18,7 @@ from PyQt6.QtGui import QFont, QSyntaxHighlighter, QTextCharFormat, QColor, QTex
 
 # --------------------------- رقم الإصدار الحالي ---------------------------
 CURRENT_VERSION = "1.0.0"
-GITHUB_RAW_URL = "https://raw.githubusercontent.com/killers007x/RDENCRM/main"
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/killers007x/RDENCRM/refs/heads/main/version.txt"
 
 # --------------------------- DATABASE ---------------------------
 class Database:

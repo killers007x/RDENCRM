@@ -1,5 +1,5 @@
 {
-  "current_version": "1.0.0",
+  "current_version": "1.0.1",
   "repo_type": "github",
   "repo_owner": "killers007x",
   "repo_name": "RDENCRM",

@@ -11,10 +11,12 @@ from PyQt6.QtWidgets import (
     QHeaderView, QMessageBox, QGroupBox, QComboBox, QDateEdit,
     QDialog, QListWidget, QTextEdit, QSplitter, QInputDialog,
     QFileDialog, QListWidgetItem, QCalendarWidget, QFrame, QScrollArea, QGridLayout,
-    QAbstractItemView, QSizePolicy
+    QAbstractItemView, QSizePolicy, QMenu
 )
 from PyQt6.QtCore import Qt, QAbstractTableModel, QDate, QEvent, QTimer, QLocale
 from PyQt6.QtGui import QFont, QSyntaxHighlighter, QTextCharFormat, QColor, QTextCursor
+
+import license_manager  # <-- وحدة الترخيص
 
 # --------------------------- DATABASE ---------------------------
 class Database:
@@ -24,85 +26,14 @@ class Database:
         self.migrate_if_needed()
 
     def create_tables(self):
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS activity_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                action TEXT NOT NULL,
-                entity TEXT NOT NULL,
-                entity_id INTEGER,
-                details TEXT,
-                timestamp TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-            )
-        """)
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS companies (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                address TEXT,
-                phone TEXT,
-                website TEXT,
-                notes TEXT
-            )
-        """)
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS contacts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                phone TEXT,
-                email TEXT,
-                company_id INTEGER,
-                notes TEXT,
-                FOREIGN KEY(company_id) REFERENCES companies(id) ON DELETE SET NULL
-            )
-        """)
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS attachments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                contact_id INTEGER NOT NULL,
-                filename TEXT NOT NULL,
-                data BLOB,
-                FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
-            )
-        """)
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS communication_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                contact_id INTEGER NOT NULL,
-                type TEXT NOT NULL,
-                date TEXT NOT NULL,
-                description TEXT,
-                FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
-            )
-        """)
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS tasks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                description TEXT,
-                due_date TEXT,
-                status TEXT DEFAULT 'Pending',
-                contact_id INTEGER,
-                FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE SET NULL
-            )
-        """)
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS deals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                value REAL DEFAULT 0.0,
-                stage TEXT DEFAULT 'Lead',
-                expected_close_date TEXT,
-                contact_id INTEGER,
-                FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE SET NULL
-            )
-        """)
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS scripts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT UNIQUE NOT NULL,
-                content TEXT
-            )
-        """)
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS activity_log (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL, entity TEXT NOT NULL, entity_id INTEGER, details TEXT, timestamp TEXT NOT NULL DEFAULT (datetime('now','localtime')))""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS companies (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, address TEXT, phone TEXT, website TEXT, notes TEXT)""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, phone TEXT, email TEXT, company_id INTEGER, notes TEXT, FOREIGN KEY(company_id) REFERENCES companies(id) ON DELETE SET NULL)""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, contact_id INTEGER NOT NULL, filename TEXT NOT NULL, data BLOB, FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE)""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS communication_log (id INTEGER PRIMARY KEY AUTOINCREMENT, contact_id INTEGER NOT NULL, type TEXT NOT NULL, date TEXT NOT NULL, description TEXT, FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE)""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT, due_date TEXT, status TEXT DEFAULT 'Pending', contact_id INTEGER, FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE SET NULL)""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS deals (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, value REAL DEFAULT 0.0, stage TEXT DEFAULT 'Lead', expected_close_date TEXT, contact_id INTEGER, FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE SET NULL)""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS scripts (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, content TEXT)""")
         self.conn.commit()
 
     def migrate_if_needed(self):
@@ -112,53 +43,29 @@ class Database:
             self.conn.execute("ALTER TABLE contacts ADD COLUMN company_id INTEGER REFERENCES companies(id)")
             self.conn.commit()
 
-    # ========== Activity Log ==========
     def log_activity(self, action, entity, entity_id=None, details=""):
-        self.conn.execute(
-            "INSERT INTO activity_log (action, entity, entity_id, details) VALUES (?, ?, ?, ?)",
-            (action, entity, entity_id, details)
-        )
+        self.conn.execute("INSERT INTO activity_log (action, entity, entity_id, details) VALUES (?, ?, ?, ?)", (action, entity, entity_id, details))
         self.conn.commit()
 
     def fetch_recent_activities(self, limit=100):
-        cur = self.conn.execute("""
-            SELECT timestamp, action, entity, details
-            FROM activity_log
-            ORDER BY id DESC LIMIT ?
-        """, (limit,))
+        cur = self.conn.execute("SELECT timestamp, action, entity, details FROM activity_log ORDER BY id DESC LIMIT ?", (limit,))
         return cur.fetchall()
 
-    # ========== Contacts ==========
     def fetch_all_contacts(self):
-        cur = self.conn.execute("""
-            SELECT c.id, c.name, c.phone, c.email, co.name, c.notes
-            FROM contacts c LEFT JOIN companies co ON c.company_id = co.id
-            ORDER BY c.name
-        """)
+        cur = self.conn.execute("SELECT c.id, c.name, c.phone, c.email, co.name, c.notes FROM contacts c LEFT JOIN companies co ON c.company_id = co.id ORDER BY c.name")
         return cur.fetchall()
 
     def search_contacts(self, keyword):
-        cur = self.conn.execute("""
-            SELECT c.id, c.name, c.phone, c.email, co.name, c.notes
-            FROM contacts c LEFT JOIN companies co ON c.company_id = co.id
-            WHERE c.name LIKE ? OR c.phone LIKE ? OR c.email LIKE ? OR co.name LIKE ?
-            ORDER BY c.name
-        """, (f'%{keyword}%', f'%{keyword}%', f'%{keyword}%', f'%{keyword}%'))
+        cur = self.conn.execute("SELECT c.id, c.name, c.phone, c.email, co.name, c.notes FROM contacts c LEFT JOIN companies co ON c.company_id = co.id WHERE c.name LIKE ? OR c.phone LIKE ? OR c.email LIKE ? OR co.name LIKE ? ORDER BY c.name", (f'%{keyword}%', f'%{keyword}%', f'%{keyword}%', f'%{keyword}%'))
         return cur.fetchall()
 
     def add_contact(self, name, phone, email, company_id, notes):
-        self.conn.execute(
-            "INSERT INTO contacts (name, phone, email, company_id, notes) VALUES (?, ?, ?, ?, ?)",
-            (name, phone, email, company_id, notes)
-        )
+        self.conn.execute("INSERT INTO contacts (name, phone, email, company_id, notes) VALUES (?, ?, ?, ?, ?)", (name, phone, email, company_id, notes))
         self.conn.commit()
         self.log_activity("Added", "Contact", None, f"Added contact: {name}")
 
     def update_contact(self, contact_id, name, phone, email, company_id, notes):
-        self.conn.execute(
-            "UPDATE contacts SET name=?, phone=?, email=?, company_id=?, notes=? WHERE id=?",
-            (name, phone, email, company_id, notes, contact_id)
-        )
+        self.conn.execute("UPDATE contacts SET name=?, phone=?, email=?, company_id=?, notes=? WHERE id=?", (name, phone, email, company_id, notes, contact_id))
         self.conn.commit()
         self.log_activity("Updated", "Contact", contact_id, f"Updated contact: {name}")
 
@@ -167,31 +74,22 @@ class Database:
         self.conn.commit()
         self.log_activity("Deleted", "Contact", contact_id, f"Deleted contact ID: {contact_id}")
 
-    # ========== Companies ==========
     def fetch_all_companies(self):
         cur = self.conn.execute("SELECT * FROM companies ORDER BY name")
         return cur.fetchall()
 
     def search_companies(self, keyword):
-        cur = self.conn.execute(
-            "SELECT * FROM companies WHERE name LIKE ? OR phone LIKE ? OR website LIKE ? ORDER BY name",
-            (f'%{keyword}%', f'%{keyword}%', f'%{keyword}%')
-        )
+        cur = self.conn.execute("SELECT * FROM companies WHERE name LIKE ? OR phone LIKE ? OR website LIKE ? ORDER BY name", (f'%{keyword}%', f'%{keyword}%', f'%{keyword}%'))
         return cur.fetchall()
 
-    def add_company(self, name, address, phone, website, notes):
-        self.conn.execute(
-            "INSERT INTO companies (name, address, phone, website, notes) VALUES (?, ?, ?, ?, ?)",
-            (name, address, phone, website, notes)
-        )
+    def add_company(self, name, address="", phone="", website="", notes=""):
+        self.conn.execute("INSERT INTO companies (name, address, phone, website, notes) VALUES (?, ?, ?, ?, ?)", (name, address, phone, website, notes))
         self.conn.commit()
         self.log_activity("Added", "Company", None, f"Added company: {name}")
+        return self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     def update_company(self, company_id, name, address, phone, website, notes):
-        self.conn.execute(
-            "UPDATE companies SET name=?, address=?, phone=?, website=?, notes=? WHERE id=?",
-            (name, address, phone, website, notes, company_id)
-        )
+        self.conn.execute("UPDATE companies SET name=?, address=?, phone=?, website=?, notes=? WHERE id=?", (name, address, phone, website, notes, company_id))
         self.conn.commit()
         self.log_activity("Updated", "Company", company_id, f"Updated company: {name}")
 
@@ -204,66 +102,46 @@ class Database:
         cur = self.conn.execute("SELECT id, name FROM companies ORDER BY name")
         return cur.fetchall()
 
-    # ========== Attachments ==========
+    def get_company_id_by_name(self, name):
+        cur = self.conn.execute("SELECT id FROM companies WHERE name=?", (name,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
     def fetch_attachments(self, contact_id):
         cur = self.conn.execute("SELECT id, filename FROM attachments WHERE contact_id=?", (contact_id,))
         return cur.fetchall()
 
     def add_attachment(self, contact_id, filename, data):
-        self.conn.execute("INSERT INTO attachments (contact_id, filename, data) VALUES (?, ?, ?)",
-                          (contact_id, filename, data))
+        self.conn.execute("INSERT INTO attachments (contact_id, filename, data) VALUES (?, ?, ?)", (contact_id, filename, data))
         self.conn.commit()
 
     def delete_attachment(self, attachment_id):
         self.conn.execute("DELETE FROM attachments WHERE id=?", (attachment_id,))
         self.conn.commit()
 
-    # ========== Communication Log ==========
     def fetch_communication_log(self, contact_id):
-        cur = self.conn.execute(
-            "SELECT id, type, date, description FROM communication_log WHERE contact_id=? ORDER BY date DESC",
-            (contact_id,))
+        cur = self.conn.execute("SELECT id, type, date, description FROM communication_log WHERE contact_id=? ORDER BY date DESC", (contact_id,))
         return cur.fetchall()
 
     def add_communication(self, contact_id, comm_type, date, description):
-        self.conn.execute(
-            "INSERT INTO communication_log (contact_id, type, date, description) VALUES (?, ?, ?, ?)",
-            (contact_id, comm_type, date.toString("yyyy-MM-dd") if isinstance(date, QDate) else date, description))
+        self.conn.execute("INSERT INTO communication_log (contact_id, type, date, description) VALUES (?, ?, ?, ?)", (contact_id, comm_type, date.toString("yyyy-MM-dd") if isinstance(date, QDate) else date, description))
         self.conn.commit()
 
-    # ========== Tasks ==========
     def fetch_all_tasks(self):
-        cur = self.conn.execute("""
-            SELECT t.id, t.title, t.description, t.due_date, t.status,
-                   c.name
-            FROM tasks t LEFT JOIN contacts c ON t.contact_id = c.id
-            ORDER BY t.due_date
-        """)
+        cur = self.conn.execute("SELECT t.id, t.title, t.description, t.due_date, t.status, c.name FROM tasks t LEFT JOIN contacts c ON t.contact_id = c.id ORDER BY t.due_date")
         return cur.fetchall()
 
     def search_tasks(self, keyword):
-        cur = self.conn.execute("""
-            SELECT t.id, t.title, t.description, t.due_date, t.status,
-                   c.name
-            FROM tasks t LEFT JOIN contacts c ON t.contact_id = c.id
-            WHERE t.title LIKE ? OR t.description LIKE ? OR c.name LIKE ?
-            ORDER BY t.due_date
-        """, (f'%{keyword}%', f'%{keyword}%', f'%{keyword}%'))
+        cur = self.conn.execute("SELECT t.id, t.title, t.description, t.due_date, t.status, c.name FROM tasks t LEFT JOIN contacts c ON t.contact_id = c.id WHERE t.title LIKE ? OR t.description LIKE ? OR c.name LIKE ? ORDER BY t.due_date", (f'%{keyword}%', f'%{keyword}%', f'%{keyword}%'))
         return cur.fetchall()
 
     def add_task(self, title, description, due_date, status, contact_id):
-        self.conn.execute(
-            "INSERT INTO tasks (title, description, due_date, status, contact_id) VALUES (?, ?, ?, ?, ?)",
-            (title, description, due_date.toString("yyyy-MM-dd") if due_date else None, status, contact_id)
-        )
+        self.conn.execute("INSERT INTO tasks (title, description, due_date, status, contact_id) VALUES (?, ?, ?, ?, ?)", (title, description, due_date.toString("yyyy-MM-dd") if due_date else None, status, contact_id))
         self.conn.commit()
         self.log_activity("Added", "Task", None, f"Added task: {title}")
 
     def update_task(self, task_id, title, description, due_date, status, contact_id):
-        self.conn.execute(
-            "UPDATE tasks SET title=?, description=?, due_date=?, status=?, contact_id=? WHERE id=?",
-            (title, description, due_date.toString("yyyy-MM-dd") if due_date else None, status, contact_id, task_id)
-        )
+        self.conn.execute("UPDATE tasks SET title=?, description=?, due_date=?, status=?, contact_id=? WHERE id=?", (title, description, due_date.toString("yyyy-MM-dd") if due_date else None, status, contact_id, task_id))
         self.conn.commit()
         self.log_activity("Updated", "Task", task_id, f"Updated task: {title}")
 
@@ -272,43 +150,21 @@ class Database:
         self.conn.commit()
         self.log_activity("Deleted", "Task", task_id, f"Deleted task ID: {task_id}")
 
-    # ========== Deals ==========
     def fetch_all_deals(self):
-        cur = self.conn.execute("""
-            SELECT d.id, d.title, d.value, d.stage, d.expected_close_date,
-                   c.name
-            FROM deals d LEFT JOIN contacts c ON d.contact_id = c.id
-            ORDER BY d.stage
-        """)
+        cur = self.conn.execute("SELECT d.id, d.title, d.value, d.stage, d.expected_close_date, c.name FROM deals d LEFT JOIN contacts c ON d.contact_id = c.id ORDER BY d.stage")
         return cur.fetchall()
 
     def search_deals(self, keyword):
-        cur = self.conn.execute("""
-            SELECT d.id, d.title, d.value, d.stage, d.expected_close_date,
-                   c.name
-            FROM deals d LEFT JOIN contacts c ON d.contact_id = c.id
-            WHERE d.title LIKE ? OR c.name LIKE ? OR d.stage LIKE ?
-            ORDER BY d.stage
-        """, (f'%{keyword}%', f'%{keyword}%', f'%{keyword}%'))
+        cur = self.conn.execute("SELECT d.id, d.title, d.value, d.stage, d.expected_close_date, c.name FROM deals d LEFT JOIN contacts c ON d.contact_id = c.id WHERE d.title LIKE ? OR c.name LIKE ? OR d.stage LIKE ? ORDER BY d.stage", (f'%{keyword}%', f'%{keyword}%', f'%{keyword}%'))
         return cur.fetchall()
 
     def add_deal(self, title, value, stage, expected_close_date, contact_id):
-        self.conn.execute(
-            "INSERT INTO deals (title, value, stage, expected_close_date, contact_id) VALUES (?, ?, ?, ?, ?)",
-            (title, value, stage,
-             expected_close_date.toString("yyyy-MM-dd") if expected_close_date else None,
-             contact_id)
-        )
+        self.conn.execute("INSERT INTO deals (title, value, stage, expected_close_date, contact_id) VALUES (?, ?, ?, ?, ?)", (title, value, stage, expected_close_date.toString("yyyy-MM-dd") if expected_close_date else None, contact_id))
         self.conn.commit()
         self.log_activity("Added", "Deal", None, f"Added deal: {title}")
 
     def update_deal(self, deal_id, title, value, stage, expected_close_date, contact_id):
-        self.conn.execute(
-            "UPDATE deals SET title=?, value=?, stage=?, expected_close_date=?, contact_id=? WHERE id=?",
-            (title, value, stage,
-             expected_close_date.toString("yyyy-MM-dd") if expected_close_date else None,
-             contact_id, deal_id)
-        )
+        self.conn.execute("UPDATE deals SET title=?, value=?, stage=?, expected_close_date=?, contact_id=? WHERE id=?", (title, value, stage, expected_close_date.toString("yyyy-MM-dd") if expected_close_date else None, contact_id, deal_id))
         self.conn.commit()
         self.log_activity("Updated", "Deal", deal_id, f"Updated deal: {title}")
 
@@ -321,12 +177,10 @@ class Database:
         self.conn.commit()
         self.log_activity("Deleted", "Deal", deal_id, f"Deleted deal ID: {deal_id}")
 
-    # ========== Helpers ==========
     def get_contact_list(self):
         cur = self.conn.execute("SELECT id, name FROM contacts ORDER BY name")
         return cur.fetchall()
 
-    # ========== Scripts ==========
     def fetch_all_scripts(self):
         cur = self.conn.execute("SELECT id, name, content FROM scripts ORDER BY name")
         return cur.fetchall()
@@ -343,7 +197,6 @@ class Database:
         self.conn.execute("DELETE FROM scripts WHERE id=?", (script_id,))
         self.conn.commit()
 
-    # ========== Dashboard Stats ==========
     def total_contacts(self):
         return self.conn.execute("SELECT COUNT(*) FROM contacts").fetchone()[0]
 
@@ -362,33 +215,28 @@ class Database:
         won = self.conn.execute("SELECT COUNT(*) FROM deals WHERE stage='Won'").fetchone()[0]
         return round(won / total * 100, 1)
 
-    # ========== EXPORT/IMPORT CSV ==========
     def export_contacts_csv(self, filepath):
         contacts = self.fetch_all_contacts()
         with open(filepath, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow(["ID", "Name", "Phone", "Email", "Company", "Notes"])
-            for c in contacts:
-                writer.writerow(c)
+            for c in contacts: writer.writerow(c)
 
     def import_contacts_csv(self, filepath):
         with open(filepath, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 name = row.get("Name", "").strip()
-                if not name:
-                    continue
+                if not name: continue
                 phone = row.get("Phone", "")
                 email = row.get("Email", "")
                 company = row.get("Company", "")
                 notes = row.get("Notes", "")
-                # find company_id if company name given
                 company_id = None
                 if company:
-                    cur = self.conn.execute("SELECT id FROM companies WHERE name=?", (company,))
-                    comp = cur.fetchone()
-                    if comp:
-                        company_id = comp[0]
+                    company_id = self.get_company_id_by_name(company)
+                    if not company_id:
+                        company_id = self.add_company(company)
                 self.add_contact(name, phone, email, company_id, notes)
 
     def export_companies_csv(self, filepath):
@@ -396,16 +244,14 @@ class Database:
         with open(filepath, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow(["ID", "Name", "Address", "Phone", "Website", "Notes"])
-            for c in companies:
-                writer.writerow(c)
+            for c in companies: writer.writerow(c)
 
     def import_companies_csv(self, filepath):
         with open(filepath, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 name = row.get("Name", "").strip()
-                if not name:
-                    continue
+                if not name: continue
                 address = row.get("Address", "")
                 phone = row.get("Phone", "")
                 website = row.get("Website", "")
@@ -417,16 +263,14 @@ class Database:
         with open(filepath, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow(["ID", "Title", "Description", "Due Date", "Status", "Contact"])
-            for t in tasks:
-                writer.writerow(t)
+            for t in tasks: writer.writerow(t)
 
     def import_tasks_csv(self, filepath):
         with open(filepath, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 title = row.get("Title", "").strip()
-                if not title:
-                    continue
+                if not title: continue
                 description = row.get("Description", "")
                 due_date = row.get("Due Date", None)
                 status = row.get("Status", "Pending")
@@ -435,8 +279,7 @@ class Database:
                 if contact_name:
                     cur = self.conn.execute("SELECT id FROM contacts WHERE name=?", (contact_name,))
                     c = cur.fetchone()
-                    if c:
-                        contact_id = c[0]
+                    if c: contact_id = c[0]
                 self.add_task(title, description, due_date if due_date else None, status, contact_id)
 
     def export_deals_csv(self, filepath):
@@ -444,16 +287,14 @@ class Database:
         with open(filepath, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow(["ID", "Title", "Value", "Stage", "Expected Close", "Contact"])
-            for d in deals:
-                writer.writerow(d)
+            for d in deals: writer.writerow(d)
 
     def import_deals_csv(self, filepath):
         with open(filepath, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 title = row.get("Title", "").strip()
-                if not title:
-                    continue
+                if not title: continue
                 try:
                     value = float(row.get("Value", 0))
                 except:
@@ -465,12 +306,11 @@ class Database:
                 if contact_name:
                     cur = self.conn.execute("SELECT id FROM contacts WHERE name=?", (contact_name,))
                     c = cur.fetchone()
-                    if c:
-                        contact_id = c[0]
+                    if c: contact_id = c[0]
                 self.add_deal(title, value, stage, expected_close if expected_close else None, contact_id)
 
 
-# --------------------------- TABLE MODELS (unchanged) ---------------------------
+# --------------------------- TABLE MODELS ---------------------------
 class ContactsTableModel(QAbstractTableModel):
     def __init__(self, data=None):
         super().__init__()
@@ -547,7 +387,7 @@ class TasksTableModel(QAbstractTableModel):
         self.endResetModel()
 
 
-# --------------------------- CONTACTS TAB (with Export/Import) ---------------------------
+# --------------------------- CONTACTS TAB ---------------------------
 class ContactsTab(QWidget):
     def __init__(self, db):
         super().__init__()
@@ -556,15 +396,12 @@ class ContactsTab(QWidget):
         self.current_id = None
 
         main_layout = QVBoxLayout(self)
-
-        # Search + Export/Import
         search_layout = QHBoxLayout()
         search_layout.addWidget(QLabel("Search:"))
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search contacts...")
         self.search_input.textChanged.connect(self.on_search)
         search_layout.addWidget(self.search_input)
-
         self.export_btn = QPushButton("Export CSV")
         self.export_btn.clicked.connect(self.export_data)
         self.import_btn = QPushButton("Import CSV")
@@ -586,7 +423,6 @@ class ContactsTab(QWidget):
         details = QTabWidget()
         details.setTabPosition(QTabWidget.TabPosition.North)
 
-        # Basic Info
         basic_widget = QWidget()
         basic_main_layout = QVBoxLayout()
         group_box = QGroupBox("Contact Details")
@@ -595,6 +431,7 @@ class ContactsTab(QWidget):
         self.phone_input = QLineEdit()
         self.email_input = QLineEdit()
         self.company_combo = QComboBox()
+        self.company_combo.setEditable(True)
         self.company_combo.addItem("-- None --", None)
         self.notes_input = QLineEdit()
         form_layout.addRow("Name *:", self.name_input)
@@ -681,8 +518,7 @@ class ContactsTab(QWidget):
 
     def export_data(self):
         filepath, _ = QFileDialog.getSaveFileName(self, "Export Contacts", "", "CSV Files (*.csv);;Excel Files (*.xlsx)")
-        if not filepath:
-            return
+        if not filepath: return
         if filepath.endswith('.xlsx'):
             try:
                 import openpyxl
@@ -691,8 +527,7 @@ class ContactsTab(QWidget):
                 ws.title = "Contacts"
                 contacts = self.db.fetch_all_contacts()
                 ws.append(["ID", "Name", "Phone", "Email", "Company", "Notes"])
-                for c in contacts:
-                    ws.append(list(c))
+                for c in contacts: ws.append(list(c))
                 wb.save(filepath)
                 QMessageBox.information(self, "Success", "Contacts exported to Excel.")
             except ImportError:
@@ -705,8 +540,7 @@ class ContactsTab(QWidget):
 
     def import_data(self):
         filepath, _ = QFileDialog.getOpenFileName(self, "Import Contacts", "", "CSV Files (*.csv);;Excel Files (*.xlsx)")
-        if not filepath:
-            return
+        if not filepath: return
         if filepath.endswith('.xlsx'):
             try:
                 import openpyxl
@@ -716,18 +550,16 @@ class ContactsTab(QWidget):
                 for row in ws.iter_rows(min_row=2, values_only=True):
                     data = dict(zip(headers, row))
                     name = data.get("Name", "").strip()
-                    if not name:
-                        continue
+                    if not name: continue
                     phone = data.get("Phone", "")
                     email = data.get("Email", "")
                     company = data.get("Company", "")
                     notes = data.get("Notes", "")
                     company_id = None
                     if company:
-                        cur = self.db.conn.execute("SELECT id FROM companies WHERE name=?", (company,))
-                        comp = cur.fetchone()
-                        if comp:
-                            company_id = comp[0]
+                        company_id = self.db.get_company_id_by_name(company)
+                        if not company_id:
+                            company_id = self.db.add_company(company)
                     self.db.add_contact(name, phone, email, company_id, notes)
                 self.load_data()
                 QMessageBox.information(self, "Success", "Contacts imported from Excel.")
@@ -747,19 +579,14 @@ class ContactsTab(QWidget):
         self.phone_input.setText(record[2] or "")
         self.email_input.setText(record[3] or "")
         company_name = record[4]
-        idx = self.company_combo.findText(company_name if company_name else "-- None --")
-        if idx >= 0:
-            self.company_combo.setCurrentIndex(idx)
-        else:
-            self.company_combo.setCurrentIndex(0)
+        self.company_combo.setCurrentText(company_name if company_name else "-- None --")
         self.notes_input.setText(record[5] or "")
         self.load_communication_log()
         self.load_attachments()
 
     def load_communication_log(self):
         self.comm_list.clear()
-        if not self.current_id:
-            return
+        if not self.current_id: return
         for eid, etype, edate, edesc in self.db.fetch_communication_log(self.current_id):
             self.comm_list.addItem(f"{edate} - {etype}: {edesc}")
 
@@ -774,8 +601,7 @@ class ContactsTab(QWidget):
 
     def load_attachments(self):
         self.attach_list.clear()
-        if not self.current_id:
-            return
+        if not self.current_id: return
         for aid, fname in self.db.fetch_attachments(self.current_id):
             item = QListWidgetItem(fname)
             item.setData(Qt.ItemDataRole.UserRole, aid)
@@ -795,8 +621,7 @@ class ContactsTab(QWidget):
 
     def remove_attachment(self):
         item = self.attach_list.currentItem()
-        if not item:
-            return
+        if not item: return
         aid = item.data(Qt.ItemDataRole.UserRole)
         self.db.delete_attachment(aid)
         self.load_attachments()
@@ -805,18 +630,33 @@ class ContactsTab(QWidget):
         self.current_id = None
         for inp in [self.name_input, self.phone_input, self.email_input, self.notes_input]:
             inp.clear()
-        self.company_combo.setCurrentIndex(0)
+        self.company_combo.setCurrentText("-- None --")
         self.comm_list.clear()
         self.attach_list.clear()
+
+    def _resolve_company(self, text):
+        if not text or text == "-- None --":
+            return None
+        name = text.strip()
+        if not name:
+            return None
+        company_id = self.db.get_company_id_by_name(name)
+        if company_id:
+            return company_id
+        else:
+            return self.db.add_company(name)
 
     def add_contact(self):
         name = self.name_input.text().strip()
         if not name:
             QMessageBox.warning(self, "Warning", "Name is required.")
             return
+        company_text = self.company_combo.currentText()
+        company_id = self._resolve_company(company_text)
         self.db.add_contact(name, self.phone_input.text().strip(), self.email_input.text().strip(),
-                            self.company_combo.currentData(), self.notes_input.text().strip())
+                            company_id, self.notes_input.text().strip())
         self.clear_form()
+        self.load_companies()
         self.load_data()
         QMessageBox.information(self, "Success", "Contact added.")
 
@@ -828,10 +668,13 @@ class ContactsTab(QWidget):
         if not name:
             QMessageBox.warning(self, "Warning", "Name is required.")
             return
+        company_text = self.company_combo.currentText()
+        company_id = self._resolve_company(company_text)
         self.db.update_contact(self.current_id, name, self.phone_input.text().strip(),
-                               self.email_input.text().strip(), self.company_combo.currentData(),
+                               self.email_input.text().strip(), company_id,
                                self.notes_input.text().strip())
         self.clear_form()
+        self.load_companies()
         self.load_data()
         QMessageBox.information(self, "Success", "Contact updated.")
 
@@ -848,7 +691,7 @@ class ContactsTab(QWidget):
             QMessageBox.information(self, "Success", "Contact deleted.")
 
 
-# --------------------------- COMPANIES TAB (with Export/Import) ---------------------------
+# --------------------------- COMPANIES TAB ---------------------------
 class CompaniesTab(QWidget):
     def __init__(self, db):
         super().__init__()
@@ -857,14 +700,12 @@ class CompaniesTab(QWidget):
         self.current_id = None
 
         main_layout = QVBoxLayout(self)
-
         search_layout = QHBoxLayout()
         search_layout.addWidget(QLabel("Search:"))
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search companies...")
         self.search_input.textChanged.connect(self.on_search)
         search_layout.addWidget(self.search_input)
-
         self.export_btn = QPushButton("Export CSV")
         self.export_btn.clicked.connect(self.export_data)
         self.import_btn = QPushButton("Import CSV")
@@ -931,8 +772,7 @@ class CompaniesTab(QWidget):
 
     def export_data(self):
         filepath, _ = QFileDialog.getSaveFileName(self, "Export Companies", "", "CSV Files (*.csv);;Excel Files (*.xlsx)")
-        if not filepath:
-            return
+        if not filepath: return
         if filepath.endswith('.xlsx'):
             try:
                 import openpyxl
@@ -941,8 +781,7 @@ class CompaniesTab(QWidget):
                 ws.title = "Companies"
                 companies = self.db.fetch_all_companies()
                 ws.append(["ID", "Name", "Address", "Phone", "Website", "Notes"])
-                for c in companies:
-                    ws.append(list(c))
+                for c in companies: ws.append(list(c))
                 wb.save(filepath)
                 QMessageBox.information(self, "Success", "Companies exported to Excel.")
             except ImportError:
@@ -955,8 +794,7 @@ class CompaniesTab(QWidget):
 
     def import_data(self):
         filepath, _ = QFileDialog.getOpenFileName(self, "Import Companies", "", "CSV Files (*.csv);;Excel Files (*.xlsx)")
-        if not filepath:
-            return
+        if not filepath: return
         if filepath.endswith('.xlsx'):
             try:
                 import openpyxl
@@ -966,8 +804,7 @@ class CompaniesTab(QWidget):
                 for row in ws.iter_rows(min_row=2, values_only=True):
                     data = dict(zip(headers, row))
                     name = data.get("Name", "").strip()
-                    if not name:
-                        continue
+                    if not name: continue
                     address = data.get("Address", "")
                     phone = data.get("Phone", "")
                     website = data.get("Website", "")
@@ -1037,7 +874,7 @@ class CompaniesTab(QWidget):
             QMessageBox.information(self, "Success", "Company deleted.")
 
 
-# --------------------------- TASKS TAB (with Export/Import) ---------------------------
+# --------------------------- TASKS TAB ---------------------------
 class TasksTab(QWidget):
     def __init__(self, db):
         super().__init__()
@@ -1046,14 +883,12 @@ class TasksTab(QWidget):
         self.current_id = None
 
         main_layout = QVBoxLayout(self)
-
         search_layout = QHBoxLayout()
         search_layout.addWidget(QLabel("Search:"))
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search tasks...")
         self.search_input.textChanged.connect(self.on_search)
         search_layout.addWidget(self.search_input)
-
         self.export_btn = QPushButton("Export CSV")
         self.export_btn.clicked.connect(self.export_data)
         self.import_btn = QPushButton("Import CSV")
@@ -1129,8 +964,7 @@ class TasksTab(QWidget):
 
     def export_data(self):
         filepath, _ = QFileDialog.getSaveFileName(self, "Export Tasks", "", "CSV Files (*.csv);;Excel Files (*.xlsx)")
-        if not filepath:
-            return
+        if not filepath: return
         if filepath.endswith('.xlsx'):
             try:
                 import openpyxl
@@ -1139,8 +973,7 @@ class TasksTab(QWidget):
                 ws.title = "Tasks"
                 tasks = self.db.fetch_all_tasks()
                 ws.append(["ID", "Title", "Description", "Due Date", "Status", "Contact"])
-                for t in tasks:
-                    ws.append(list(t))
+                for t in tasks: ws.append(list(t))
                 wb.save(filepath)
                 QMessageBox.information(self, "Success", "Tasks exported to Excel.")
             except ImportError:
@@ -1153,8 +986,7 @@ class TasksTab(QWidget):
 
     def import_data(self):
         filepath, _ = QFileDialog.getOpenFileName(self, "Import Tasks", "", "CSV Files (*.csv);;Excel Files (*.xlsx)")
-        if not filepath:
-            return
+        if not filepath: return
         if filepath.endswith('.xlsx'):
             try:
                 import openpyxl
@@ -1164,8 +996,7 @@ class TasksTab(QWidget):
                 for row in ws.iter_rows(min_row=2, values_only=True):
                     data = dict(zip(headers, row))
                     title = data.get("Title", "").strip()
-                    if not title:
-                        continue
+                    if not title: continue
                     description = data.get("Description", "")
                     due_date = data.get("Due Date", None)
                     status = data.get("Status", "Pending")
@@ -1174,8 +1005,7 @@ class TasksTab(QWidget):
                     if contact_name:
                         cur = self.db.conn.execute("SELECT id FROM contacts WHERE name=?", (contact_name,))
                         c = cur.fetchone()
-                        if c:
-                            contact_id = c[0]
+                        if c: contact_id = c[0]
                     self.db.add_task(title, description, due_date if due_date else None, status, contact_id)
                 self.load_data()
                 QMessageBox.information(self, "Success", "Tasks imported from Excel.")
@@ -1254,7 +1084,64 @@ class TasksTab(QWidget):
             QMessageBox.information(self, "Success", "Task deleted.")
 
 
-# --------------------------- KANBAN DEALS TAB (with Export/Import) ---------------------------
+# --------------------------- KANBAN DEALS TAB ---------------------------
+class DealCard(QFrame):
+    def __init__(self, deal_id, title, value, close_date, contact_name, parent=None):
+        super().__init__(parent)
+        self.deal_id = deal_id
+        self.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Raised)
+        self.setMinimumHeight(60)
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel(f"<b>{title}</b>"))
+        layout.addWidget(QLabel(f"${value:,.2f}"))
+        if close_date:
+            layout.addWidget(QLabel(f"Close: {close_date}"))
+        if contact_name:
+            layout.addWidget(QLabel(f"Contact: {contact_name}"))
+        self.setLayout(layout)
+
+class KanbanColumn(QListWidget):
+    def __init__(self, stage, deals_tab, parent=None):
+        super().__init__(parent)
+        self.stage = stage
+        self.deals_tab = deals_tab
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+
+    def dropEvent(self, event):
+        super().dropEvent(event)
+        source = event.source()
+        if source and isinstance(source, KanbanColumn):
+            selected_items = source.selectedItems()
+            if selected_items:
+                item = selected_items[0]
+                deal_id = getattr(item, 'deal_id', None)
+                if deal_id:
+                    self.deals_tab.db.update_deal_stage(deal_id, self.stage)
+        self.deals_tab.refresh_pipeline()
+
+    def add_deal_card(self, deal):
+        item = QListWidgetItem()
+        card = DealCard(deal[0], deal[1], deal[2], deal[4], deal[5])
+        item.setSizeHint(card.sizeHint())
+        self.addItem(item)
+        self.setItemWidget(item, card)
+        item.deal_id = deal[0]
+
+    def contextMenuEvent(self, event):
+        item = self.itemAt(event.pos())
+        if item and hasattr(item, 'deal_id'):
+            menu = QMenu(self)
+            delete_action = menu.addAction("Delete Deal")
+            action = menu.exec(event.globalPos())
+            if action == delete_action:
+                reply = QMessageBox.question(self, "Confirm", "Delete this deal?",
+                                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if reply == QMessageBox.StandardButton.Yes:
+                    self.deals_tab.db.delete_deal(item.deal_id)
+                    self.deals_tab.refresh_pipeline()
+
 class KanbanDealsTab(QWidget):
     def __init__(self, db):
         super().__init__()
@@ -1263,13 +1150,11 @@ class KanbanDealsTab(QWidget):
         self.columns = {}
 
         main_layout = QVBoxLayout(self)
-
         search_layout = QHBoxLayout()
         search_layout.addWidget(QLabel("Search:"))
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search deals...")
         search_layout.addWidget(self.search_input)
-
         self.export_btn = QPushButton("Export CSV")
         self.export_btn.clicked.connect(self.export_data)
         self.import_btn = QPushButton("Import CSV")
@@ -1283,7 +1168,7 @@ class KanbanDealsTab(QWidget):
         scroll_widget = QWidget()
         grid = QGridLayout(scroll_widget)
         for i, stage in enumerate(self.stages):
-            column = KanbanColumn(stage)
+            column = KanbanColumn(stage, self)
             lbl = QLabel(f"<h3>{stage}</h3>")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             grid.addWidget(lbl, 0, i)
@@ -1310,11 +1195,6 @@ class KanbanDealsTab(QWidget):
                 self.columns[stage].add_deal_card(deal)
 
     def refresh_pipeline(self):
-        for stage, column in self.columns.items():
-            for i in range(column.count()):
-                item = column.item(i)
-                if hasattr(item, 'deal_id'):
-                    self.db.update_deal_stage(item.deal_id, stage)
         self.load_pipeline()
 
     def add_deal_dialog(self):
@@ -1354,8 +1234,7 @@ class KanbanDealsTab(QWidget):
 
     def export_data(self):
         filepath, _ = QFileDialog.getSaveFileName(self, "Export Deals", "", "CSV Files (*.csv);;Excel Files (*.xlsx)")
-        if not filepath:
-            return
+        if not filepath: return
         if filepath.endswith('.xlsx'):
             try:
                 import openpyxl
@@ -1364,8 +1243,7 @@ class KanbanDealsTab(QWidget):
                 ws.title = "Deals"
                 deals = self.db.fetch_all_deals()
                 ws.append(["ID", "Title", "Value", "Stage", "Expected Close", "Contact"])
-                for d in deals:
-                    ws.append(list(d))
+                for d in deals: ws.append(list(d))
                 wb.save(filepath)
                 QMessageBox.information(self, "Success", "Deals exported to Excel.")
             except ImportError:
@@ -1378,8 +1256,7 @@ class KanbanDealsTab(QWidget):
 
     def import_data(self):
         filepath, _ = QFileDialog.getOpenFileName(self, "Import Deals", "", "CSV Files (*.csv);;Excel Files (*.xlsx)")
-        if not filepath:
-            return
+        if not filepath: return
         if filepath.endswith('.xlsx'):
             try:
                 import openpyxl
@@ -1389,8 +1266,7 @@ class KanbanDealsTab(QWidget):
                 for row in ws.iter_rows(min_row=2, values_only=True):
                     data = dict(zip(headers, row))
                     title = data.get("Title", "").strip()
-                    if not title:
-                        continue
+                    if not title: continue
                     try:
                         value = float(data.get("Value", 0))
                     except:
@@ -1402,8 +1278,7 @@ class KanbanDealsTab(QWidget):
                     if contact_name:
                         cur = self.db.conn.execute("SELECT id FROM contacts WHERE name=?", (contact_name,))
                         c = cur.fetchone()
-                        if c:
-                            contact_id = c[0]
+                        if c: contact_id = c[0]
                     self.db.add_deal(title, value, stage, expected_close if expected_close else None, contact_id)
                 self.load_pipeline()
                 QMessageBox.information(self, "Success", "Deals imported from Excel.")
@@ -1416,43 +1291,6 @@ class KanbanDealsTab(QWidget):
             QMessageBox.information(self, "Success", "Deals imported from CSV.")
 
 
-# --------------------------- DealCard / KanbanColumn (unchanged) ---------------------------
-class DealCard(QFrame):
-    def __init__(self, deal_id, title, value, close_date, contact_name, parent=None):
-        super().__init__(parent)
-        self.deal_id = deal_id
-        self.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Raised)
-        self.setMinimumHeight(60)
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel(f"<b>{title}</b>"))
-        layout.addWidget(QLabel(f"${value:,.2f}"))
-        if close_date:
-            layout.addWidget(QLabel(f"Close: {close_date}"))
-        if contact_name:
-            layout.addWidget(QLabel(f"Contact: {contact_name}"))
-        self.setLayout(layout)
-
-class KanbanColumn(QListWidget):
-    def __init__(self, stage, parent=None):
-        super().__init__(parent)
-        self.stage = stage
-        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
-        self.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-
-    def dropEvent(self, event):
-        super().dropEvent(event)
-        QTimer.singleShot(100, self.parent().parent().refresh_pipeline)
-
-    def add_deal_card(self, deal):
-        item = QListWidgetItem()
-        card = DealCard(deal[0], deal[1], deal[2], deal[4], deal[5])
-        item.setSizeHint(card.sizeHint())
-        self.addItem(item)
-        self.setItemWidget(item, card)
-        item.deal_id = deal[0]
-
-
 # --------------------------- CALENDAR TAB ---------------------------
 class CalendarTab(QWidget):
     def __init__(self, db):
@@ -1463,7 +1301,6 @@ class CalendarTab(QWidget):
         self.calendar.setLocale(QLocale(QLocale.Language.English))
         self.calendar.clicked.connect(self.on_date_selected)
         layout.addWidget(self.calendar, 1)
-
         right_panel = QVBoxLayout()
         self.event_list = QListWidget()
         right_panel.addWidget(QLabel("Tasks/Events on selected date:"))
@@ -1485,7 +1322,6 @@ class DashboardTab(QWidget):
         super().__init__()
         self.db = db
         layout = QVBoxLayout(self)
-
         title = QLabel("<h2>Dashboard</h2>")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
@@ -1511,11 +1347,9 @@ class DashboardTab(QWidget):
             cards_layout.addWidget(container)
 
         layout.addLayout(cards_layout)
-
         layout.addWidget(QLabel("<b>Recent Activity</b>"))
         self.activity_list = QListWidget()
         layout.addWidget(self.activity_list)
-
         self.refresh()
 
     def refresh(self):
@@ -1523,7 +1357,6 @@ class DashboardTab(QWidget):
         self.lbl_open_deals.setText(str(self.db.open_deals()))
         self.lbl_revenue.setText(f"${self.db.total_revenue():,.2f}")
         self.lbl_close_ratio.setText(f"{self.db.close_ratio()}%")
-
         self.activity_list.clear()
         for timestamp, action, entity, details in self.db.fetch_recent_activities(20):
             self.activity_list.addItem(f"[{timestamp}] {action} {entity}: {details}")
@@ -1539,7 +1372,7 @@ def check_upcoming_tasks(db):
         QMessageBox.information(None, "Task Reminder", msg)
 
 
-# --------------------------- LUA EDITOR (unchanged) ---------------------------
+# --------------------------- LUA EDITOR ---------------------------
 class LuaHighlighter(QSyntaxHighlighter):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1672,7 +1505,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.db = Database()
-        self.setWindowTitle("CRM - Customer Relationship Management")
+        self.setWindowTitle("RdenCRM - Customer Relationship Management")
         self.setMinimumSize(1200, 700)
 
         QTimer.singleShot(1000, lambda: check_upcoming_tasks(self.db))
@@ -1701,8 +1534,11 @@ class MainWindow(QMainWindow):
         self.tabs.currentChanged.connect(self.on_tab_changed)
 
     def on_tab_changed(self, index):
-        if self.tabs.tabText(index) == "Dashboard":
+        tab_name = self.tabs.tabText(index)
+        if tab_name == "Dashboard":
             self.dashboard_tab.refresh()
+        elif tab_name == "Contacts":
+            self.contacts_tab.load_companies()
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -1717,10 +1553,22 @@ class MainWindow(QMainWindow):
         self.script_editor.show()
 
 
-# --------------------------- RUN ---------------------------
+# --------------------------- تشغيل البرنامج ---------------------------
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    app.setFont(QFont("Segoe UI", 10))
+    # فحص الترخيص
+    valid, dev_id, reason = license_manager.check_license()
+    if not valid:
+        app = QApplication(sys.argv)
+        app.setFont(QFont("Segoe UI", 10))
+        dlg = license_manager.ActivationDialog(dev_id, reason, str(license_manager.LICENSE_DIR))
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            sys.exit()
+
+    # بدء البرنامج
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+        app.setFont(QFont("Segoe UI", 10))
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
